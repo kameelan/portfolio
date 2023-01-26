@@ -1,0 +1,325 @@
+---
+title: "Final - QC"
+author: "Kameela Noah"
+date: "11/30/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+#Chylamdia Cluster Comparison: A Methodological Exploration in Georgia (2015-2019
+##Background
+Chlamydia is a common sexually transmitted infection caused by Chlamydia trachomatis bacteria. Both sexes can contract Chlamydia, and repeat infection is common. At least 70% of women and 50% of men infected are asymptomatic.
+
+In the state of Georgia, health professionals are mandated to report Chlamydia cases to the Department of Health within 7 days of discovery. Chlamydia is Georgia’s most commonly reported notifiable disease. Georgia had the 6th highest rate of Chlamydia in the US in 2017. Among Georgian adolescents & young adults, 80% of STI infections are Chlamydia.
+
+We aim to identify clusters of Chlamydia rates among young adults (18-24 years) in Georgian counties using three different methods. We will use the Kulldorf scan statistic, Local Moran's I using Inverse Distance neighbors, and Local Moran's I using Queen Contiguity neighbors. Comparison of the three sets of results will provide insight on how different neighbor definitions alter observed spatial patterns of disease. Cluster interpretations using the three different methods have the potential to inform public health interventions in various ways. 
+
+##Loading Packages
+```{r}
+pacman::p_load(tidyverse, # General data management
+                sf, # read/write spatial data
+                spatstat, #spatial statistics 
+                ggplot2, #plotting
+                tibble,#Manage spatial data classes
+                spatialreg,
+                scanstatistics, #needed to conduct scan statistics
+                SpatialEpi, #needed to call kulldorff function
+                tmap, #mapping package
+                tidycensus,#Functionality for spatial regression including spatial econometrics
+                spdep,
+                readxl) #creates spatial weights for spatial analysis
+```
+
+##Preparing Data
+###Data Sources
+To begin our methods comparison, data was read in from an excel sheet and geopackage. The 'std_cases' dataset originates from the Georgia Department of Health's (GDPH) Online Analytically Statistical Information System (OASIS). Chlamydia cases among adults aged 18-24 years over a five year period, 2015-2019, were selected by county. This analysis was restricted to 18-24 year olds, as previous literature suggests this age stratum is most affected by chlamydia. According to the GDPH, 58% of all STD cases occur among people aged 15-24 years. An aggregated five-year period was chosen to pool case numbers to avoid sparse case counts inappropriate for analysis. Case counts at a county level were analyzed, as counties report cases to the state of Georgia. The 'geography' data object was supplied by Dr. Michael Kramer and contains county-level geographic boundaries necessary for spatial analysis. It was transformed to Albers Equal Area confirmation, as is appropriate for public health analysis. To calculate the crude rate of chlamydia in Georgia counties, data from the U.S. Census for 2019 was  requested. The total number of 18-24 year-olds in Georgia counties was used as the crude rate denominator. These population counts were selected from 2019, because it is unlikely the population of 18-24 year-olds changed substantially in Georgia.
+
+```{r}
+std_cases<-read_excel('Chlamydia__18-24_Years.xlsx')%>%
+  mutate(tot_cases = as.numeric(`Selected Years Total`))
+geography <- st_read('georgia_counties_aea.gpkg')
+```
+
+
+##Calculating Crude Rate of Chlamydia among Adults Aged 18-24 Years
+The crude rate of chlamydia was used for analysis. The crude rate was selected over an age-adjusted rate, because analysis was already restricted to persons aged 18 to 24 years. To calculate the crude rate, the case count per Georgia county was divided by the total number of 18-24 year-olds in each county.
+
+###Request Population Data from U.S. Census 
+```{r}
+#Create 'totals' object that contains total number of Chlamydia cases in Georgia per year
+totals <- std_cases[std_cases$Geography == 'County Summary',]
+#Create 'county_cases' object that has number of cases per year and the total case count in each GA county
+county_cases <- std_cases[std_cases$Geography != 'County Summary',]
+colnames(county_cases)[1] <- "NAME"
+colnames(county_cases)[7] <- "tot_cases"
+#Join geography and county_cases datasets by county name to create new dataset
+county_cases_w_geo <- left_join(geography, county_cases, by = 'NAME')
+#Load data from U.S. Census for the year 2019 
+all_vars <- load_variables(year = 2019, dataset = 'acs5', cache = T)
+#Examine all_vars object
+names(all_vars)
+head(all_vars)
+```
+
+```{r}
+#Create labels
+labels <- c('18 and 19 years','20 years','21 years', '22 to 24 years')
+#Create object 'a' containing population data for 18-24 year olds
+a <- all_vars %>% 
+  filter(stringr::str_detect(name, 'B01001'))
+#Further select for rows only containing population data for adults aged 18-24 years
+rows_wanted<-c(7,8,9,10,31,32,33,34)
+a2 <- a[rows_wanted,]
+#Create 'a3' object that has the total number of 18-24 year old adults per county for the year 2019
+a3 <- a2$name
+pop_tidy <- get_acs(geography = 'county',   
+                     variables = a3,           
+                     year = 2019,              
+                     survey = 'acs5') %>%      
+  select(-moe) 
+#Create dataset that contains total population count, case counts, and geography
+population18_24 <- pop_tidy %>%
+  group_by(GEOID) %>%
+  summarise(pop_18_24 = sum(estimate))
+cases_pop_geo <- left_join(county_cases_w_geo, population18_24, by = 'GEOID')
+```
+###Calculating Chlamydia Crude Rate over 5-Year Period, 2015-2019
+```{r}
+#Change to numeric data for calculations
+cases_pop_geo$tot_cases<-as.numeric(gsub(",", "", cases_pop_geo$tot_cases))
+#Create 'rate' variable by dividing total number of chlamydia cases from 2015-2019 by the total 18-24 year old population
+cases_pop_geo$rate <- cases_pop_geo$tot_cases/cases_pop_geo$pop_18_24
+```
+
+###Plotting 5-Year Period Crude Rate 
+The crude rate of chlamydia among young adults in each county will be mapped. This will allow for comparison to clusters identified using the Kulldorff scan statistic and Local Moran's I. A sequential color palette using blues, greens, and yellows was used to visualize the crude rate. Counties with the most extreme rates were colored with dark blue, and those with the lowest rates were colored with pale yellow. The deep blue is naturally associated with high values.  
+```{r}
+#First, create crude rate per 1,000 people
+cases_pop_geo$rate_per_1000 = cases_pop_geo$rate*1000
+#Plot crude rate
+crate_map <- tm_shape(cases_pop_geo) +
+  tm_fill('rate_per_1000',
+          style = 'quantile',
+          palette = 'YlGnBu',
+          title = 'Chlamydia crude rate per 1,000 persons') + 
+  tm_borders() + 
+  tm_layout(legend.outside = T, 
+            inner.margins=c(0.1, 0.02, 0.1, 0.07),
+            main.title = 'Georgia Chlamydia 5-year crude rate per 1,000 persons\namong young adults (2015-2019)' ,
+            main.title.size = 1) +
+  tm_compass(position=c("LEFT", "BOTTOM"), #add compass rose to bottom left corner
+            color.dark = "grey45", 
+            text.color = "grey45", 
+            size = 1.5) +
+  tm_scale_bar(text.size = 0.3, color.dark='#636363') +
+  tm_shape(geography) + tm_borders()
+crate_map
+```
+
+
+##Kurdoff's Spatial Scan Statistics 
+Kulldorf Spatial Scan Statistic clustering uses likelihood ratio tests to determine if the rate inside a local window differs from the rate outside of the window. We will use a spatial-only Kulldorf scan statistic to identify the most likely cluster and secondary clusters with unusually high rates of chlamydia among young adults. The scan statistic assumes the null hypothesis that the rate of chlamydia is constant. Our analysis uses a Poisson distribution. Neighbors are defined using centroid points and creating a radius made as the function of population at risk. Our window was set to include 50% of the population, as is standard with public health practice. 
+
+```{r}
+#Calculate expected chlamydia rates for 5-year period
+cases_pop_geo$tot_rate <- (sum(cases_pop_geo$tot_cases, na.rm = T)/sum(cases_pop_geo$pop_18_24, na.rm = T)) 
+cases_pop_geo$expected <- cases_pop_geo$tot_rate*cases_pop_geo$pop_18_24
+head(cases_pop_geo$expected)
+```
+
+```{r}
+#Create centroids for neighboring 
+cases_cent <- cases_pop_geo %>% #Start with sf polygon object, cases_pop_geo
+  st_centroid()%>% #Find centroid of each polygon and change to point object 
+  st_coordinates() #Extract the x,y coordinates from the sf points object
+```
+
+```{r}
+#Conduct Kulldorf spatial scan statistic
+k1 <- kulldorff(cases_cent, 
+                cases = cases_pop_geo$tot_cases,
+                population = cases_pop_geo$pop_18_24,
+                expected.cases = cases_pop_geo$expected,
+                pop.upper.bound = 0.5, #Set maximum window including 50% of the population
+                n.simulations = 499, #Specify 499 simulations of null hypothesis of constant risk estimation 
+                alpha.level = 0.2) #Alpha level set to 0.2
+```
+###Identify Most Likely Clusters
+```{r}
+# See the row-numbers for the counties in the most-likely cluster
+k1$most.likely.cluster$location.IDs.included
+
+# See the SMR for the most-likely cluster
+k1$most.likely.cluster$SMR
+
+# See the log likelihood for the most-likely cluster
+k1$most.likely.cluster$log.likelihood.ratio
+
+# See the observed and expected cases inside cluster
+k1$most.likely.cluster$number.of.cases
+k1$most.likely.cluster$expected.cases
+```
+###Prepare Data for Plotting
+```{r}
+#Initialize k1_cluster by assigning no values
+cases_pop_geo$k1_cluster <- NA
+#Fill in the value for k1_cluster according to whether each county is in a given cluster. Use vector of row indices previously made. 
+cases_pop_geo$k1_cluster[k1$most.likely.cluster$location.IDs.included] <- 'Most likely cluster'
+```
+
+```{r}
+#Use an i loop to extract locations of secondary clusters and name them
+for(i in 1:length(k1$secondary.clusters)){
+cases_pop_geo$k1_cluster[k1$secondary.clusters[[i]]$location.IDs.included] <- paste(
+  'Secondary cluster ', i, sep = '')
+}
+```
+###Mapping Kulldorf Spatial Scan Statistic Clusters
+To map likely clusters of chlamydia rates, the color palette produced by GIS was kept. Red was chosen to easily visualize the most likely cluster, as it is bold and associated with extremes. The secondary cluster colors were chosen to contrast with the red most-likely cluster. Gray was chosen to represent non-cluster counties and keep the map from being too distracting. A scale bar and north arrow were included to orient the audience.
+```{r}
+scan_cluster <- tm_shape(cases_pop_geo) +
+  tm_fill('k1_cluster',
+          style = 'cat',
+          textNA = 'Not in cluster',
+          palette = 'Set1', #keep GIS color palette
+          title = '') + 
+  tm_borders() + 
+  tm_layout(legend.outside=T,
+            legend.text.size = 0.6,
+inner.margins=c(0.1, 0.02, 0.1, 0.07), 
+    main.title = "Chylamdia rate clusters identified with Kulldorff Scan Statistic\n(2015-2019)",
+            main.title.size = 0.75)+
+tm_compass(position=c("LEFT", "BOTTOM"), #add compass rose to bottom left corner
+            color.dark = "grey45", 
+            text.color = "grey45", 
+            size = 1.5) +
+  tm_scale_bar(text.size = 0.3, color.dark='#636363') +
+  tm_shape(geography) + tm_borders()
+scan_cluster
+```
+
+
+##Local Moran's I for Inverse Distance Neighbors
+Local Moran’s I Clustering determines if a county’s rate is correlated to the rates of its neighboring counties. The Local Moran's I was chosen to assess spatial dependence of chlamydia rates. Two neighbor definitions were considered, Queen’s Contiguity and Inverse Distance up to 150 km. P-values were adjusted for multiple comparisons using the False Discovery Rate. Local indicators of spatial association statistics (LISA) identifying hot and cold spots were plotted on maps.
+
+###Creating Inverse Distance Neighbors
+Inverse distance neighbors of 150 km were chosen to conduct the Local Moran's I statistic. 150 km was chosen to contrast the much shorter distance of borders the Queen Contiguity neighbor definition uses. This strategy assumes nearness of neighbor objects is the inverse of road-network distance. It provides an interesting opportunity for interpretation of clustering; it assumes clustering may be due to nearness of resources, like a clinic that reports chlamydia. 
+```{r}
+#Create centroids
+cent <- st_centroid(st_geometry(geography))
+#Create inverse nearest neighbor definition
+nb_geom <- dnearneigh(cent, 0, 150000) #Set distance to 150,000 meters
+#Create inverse distance by neighbor definition (above) weights
+ga_weights <- nb2listwdist(nb_geom, cent, type = "idw", alpha = 2,
+  style="W", zero.policy = TRUE)
+```
+###Calculating Local Moran's I for Inverse Distance Neighbors
+```{r}
+#Calculate Local Moran's I using Inverse Distance Neighbors
+lm1 <- localmoran(x = cases_pop_geo$rate,
+                  listw = ga_weights,
+                  p.adjust.method = 'fdr' )
+#Examine test results
+summary(lm1)
+dim(lm1) # one line for each county
+names(lm1)[5] <- 'pvalue' #rename column with p-values
+#Create lagged local average rate for 2015-2019
+cases_pop_geo$lag <- lag.listw(ga_weights, var = cases_pop_geo$rate)
+cases_pop_geo$lm_pv <- lm1[,5] #save p-values to main dataset
+
+#Create new dataset with standardized crude rate and categorical values for which of the four quadrants the results fall within
+ga_geom_lm <- cases_pop_geo %>%
+  mutate(rate_std = as.numeric(scale(rate)), #Scale the rate
+         lag_std = as.numeric(scale(lag)), #Calculate scale version of lag
+         lm_quad = factor(case_when(  #All of this is assigning labels based on values
+           rate_std >= 0 & lag_std >= 0 & lm_pv < 0.05 ~ 'High-High',
+           rate_std <= 0 & lag_std <= 0 & lm_pv < 0.05 ~ 'Low-Low',
+           rate_std <= 0 & lag_std >= 0 & lm_pv < 0.05 ~ 'Low-High',
+           rate_std >= 0 & lag_std <= 0 & lm_pv < 0.05 ~ 'High-Low',
+           lm_pv >= 0.05 ~ 'Non-significant'),
+           levels = c('High-High','Low-Low','Low-High','High-Low','Non-significant')))
+```
+###Plotting Cluster Map with Inverse Distance Neighbors
+Red was chosen to easily visualize areas with high-high clustering, and blue was chosen to visualize areas with low-low clustering. Red and blue contrast each other well visually, providing a natural dichotomy between high-high and low-low clustering. Green represents areas with low-high clustering, which is contrasted well against purple areas with high-low clustering. A pale yellow was chosen to represent non-significant areas and keep the map from being too distracting. This palette was kept for the Queen Contiguity neighbor map as well. A scale bar and north arrow were included to orient the audience.
+```{r}
+inverse_clust <- tm_shape(ga_geom_lm) +
+  tm_fill('lm_quad', #map the categories of clusters
+          style = 'cat',
+          palette = c("#D2042D", "#0096FF", "#4DAF4A", "#984EA3", "#ffffb3"), #Select color palette 
+          title = 'Cluster category') +
+  tm_layout(legend.outside = T,
+            legend.text.size = 0.5,
+            legend.title.size = 0.6,
+inner.margins=c(0.1, 0.02, 0.1, 0.07), 
+    main.title = "Chylamdia rate clusters identified with Local Morans I using\nInverse Distance Neighbors (2015-2019)",
+            main.title.size = 0.75)+
+tm_compass(position=c("LEFT", "BOTTOM"), #add compass rose to bottom left corner
+            color.dark = "grey45", 
+            text.color = "grey45", 
+            size = 1.5) +
+  tm_scale_bar(text.size = 0.3, color.dark='#636363') +
+  tm_shape(geography) + tm_borders()
+inverse_clust
+```
+
+
+##Local Moran's I for Queen Contiguity Neighbors
+To assess clustering, a Queen contiguity neighbor definition was selected. This neighbor definition defines neighbors as sharing border or corners. The Local Moran's I using a Queen contiguity neighbor was selected as it is most intuitive to share with lay audiences, like non-public health affiliated politicians. 
+
+###Creating Queen Contiguity Neighbors
+```{r}
+#Create Queen Contiguity neighbor object
+qnb <- poly2nb(cases_pop_geo) 
+#Row-standardized weights
+q_listw <- nb2listw(qnb, style = 'W') 
+```
+###Local Moran's I
+```{r}
+#Create 'lm2' object for Local Moran's I
+lm2 <- localmoran(x=cases_pop_geo$rate,
+                  listw=q_listw, #call Queen neighbor row-standardized weights
+                  p.adjust.method = 'fdr') #false discovery rate
+#Examine Local Moran's I test
+summary(lm1)
+```
+
+```{r}
+#Create lagged local CBG mobility index, the average of the queen neighbors value
+cases_pop_geo$lag <- lag.listw(q_listw, var = cases_pop_geo$rate)
+cases_pop_geo$lm_pv <- lm2[,5]
+# Create a new dataset that includes standardized values, and then creates a new variable
+# 'lm_quad' which takes on the above categorical values
+cases_pop_geo_lm2 <- cases_pop_geo %>%
+mutate(raw_std = as.numeric(scale(rate)), # scale means standardize to mean 0, 1 SD
+lag_std = as.numeric(scale(lag)),
+lm_quad = factor(case_when( # All of this is assigning labels based on values
+raw_std >= 0 & lag_std >= 0 & lm_pv < 0.05 ~ 'High-High',
+raw_std <= 0 & lag_std <= 0 & lm_pv < 0.05 ~ 'Low-Low',
+raw_std <= 0 & lag_std >= 0 & lm_pv < 0.05 ~ 'Low-High',
+raw_std >= 0 & lag_std <= 0 & lm_pv < 0.05 ~ 'High-Low',
+lm_pv >= 0.05 ~ 'Non-significant'),
+levels = c('High-High','Low-Low','Low-High','High-Low','Non-significant')))
+```
+###Plotting Cluster Map with Queen Contiguity Neighbors
+Red was chosen to easily visualize areas with high-high clustering, and blue was chosen to visualize areas with low-low clustering. Red and blue contrast each other well visually, providing a natural dichotomy between high-high and low-low clustering. Green represents areas with low-high clustering, which is contrasted well against purple areas with high-low clustering. A pale yellow was chosen to represent non-significant areas and keep the map from being too distracting. A scale bar and north arrow were included to orient the audience.
+```{r}
+queen_cluster <- tm_shape(cases_pop_geo_lm2) +
+tm_fill('lm_quad',
+style = 'cat',
+palette = c("#D2042D", "#0096FF", "#4DAF4A", "#984EA3", "#ffffb3"),
+title = 'Cluster category') +
+  tm_layout(legend.outside = T,
+            legend.text.size = 0.5,
+            legend.title.size = 0.6,
+inner.margins=c(0.1, 0.02, 0.1, 0.07),
+main.title = 'Chylamdia rate clusters identified with Local Morans I using\nQueen Contiguity Neighbors (2015-2019)',
+main.title.size = 0.75) +
+    tm_compass(position=c('LEFT', 'BOTTOM'), size =1.5, color.dark = '#636363', text.color= '#636363')  +
+  tm_scale_bar(text.size = 0.3, color.dark='#636363') +
+  tm_shape(geography) + tm_borders()
+queen_cluster
+```
+
