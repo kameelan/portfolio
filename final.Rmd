@@ -1,0 +1,67 @@
+---
+title: "EPI569 Final"
+author: "Kameela Noah"
+date: "12/7/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(tidyverse)
+library(dplyr)
+library(readxl)
+library(ggplot2)
+library(EpiEstim)
+```
+Load data
+```{r}
+outbreak <- read.csv('outbreak_f.csv')
+trans <- read.csv('transmission_pair.csv')
+```
+Create new variable
+```{r}
+gender <- outbreak %>% #create new variable contact gender
+  select(case_id, gender) %>%
+  rename(contact_gender = gender,
+         infected_by = case_id)
+test_data <- right_join(outbreak, gender, by = 'infected_by') 
+```
+
+```{r}
+test_data2 <- test_data %>%
+  filter(case == "Yes")
+
+table(test_data2$gender)
+
+table(test_data2$contact_gender)
+#Numerator data
+test_data2 %>%
+  group_by(gender) %>%
+  count(contact_gender)
+```
+```{r}
+table(test_data2$contact_gender)
+```
+```{r}
+class <- outbreak %>% #create new variable contact gender
+  select(case_id, class) %>%
+  rename(contact_class = class,
+         infected_by = case_id)
+test_data <- right_join(outbreak, class, by = 'infected_by')
+```
+```{r}
+test_data2 <- test_data %>%
+  filter(case == "Yes")
+
+table(test_data2$class)
+
+table(test_data2$contact_class)
+#Numerator data
+test_data2 %>%
+  group_by(class) %>%
+  count(contact_class)
+```
+
